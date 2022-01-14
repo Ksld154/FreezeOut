@@ -56,7 +56,7 @@ def get_data_loader(which_dataset,augment=True,validate=True,batch_size=50):
     class CIFAR10(dset.CIFAR10):
         def __len__(self):
             if self.train:
-                return len(self.train_data)
+                return len(self.data)
             else:
                 return 10000
 
@@ -64,7 +64,7 @@ def get_data_loader(which_dataset,augment=True,validate=True,batch_size=50):
     class CIFAR100(dset.CIFAR100):
         def __len__(self):
             if self.train:
-                return len(self.train_data)
+                return len(self.data)
             else:
                 return 10000
 
@@ -109,10 +109,10 @@ def get_data_loader(which_dataset,augment=True,validate=True,batch_size=50):
     elif validate:
         test_set = dataset(root='cifar', train=True, download=True,
                            transform=test_transform)
-        test_set.train_data = test_set.train_data[-5000:]
-        test_set.train_labels = test_set.train_labels[-5000:]
-        train_set.train_data = train_set.train_data[:-5000]
-        train_set.train_labels = train_set.train_labels[:-5000]
+        test_set.data = test_set.data[-5000:]
+        test_set.targets = test_set.targets[-5000:]
+        train_set.data = train_set.data[:-5000]
+        train_set.targets = train_set.targets[:-5000]
 
     # Prepare data loaders
     train_loader = DataLoader(train_set, batch_size=batch_size,
