@@ -46,6 +46,13 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
+
+
 # Python files
 .pyc
 WRN logs
+*.pth
+*.pyc
+logs
+*.tar.gz
+cifar

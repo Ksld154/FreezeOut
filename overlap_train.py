@@ -112,7 +112,8 @@ class Trainer():
 
         # Report training metrics
         train_loss = float(np.mean(train_loss))
-        print('  training loss:\t%.6f', train_loss)
+        # print('  training loss:\t%.6f', train_loss)
+        # print(f'  training loss:\t{train_loss:.6f}')
         self.mlog.log(epoch=epoch, train_loss=float(train_loss))
 
         # Check how many layers are active
@@ -141,17 +142,20 @@ class Trainer():
 
         # Report validation metrics
         val_loss = float(np.mean(val_loss))
-        val_err = 100 * float(np.sum(val_err)) / \
-            len(self.test_loader.dataset)
-        print('  validation loss:\t%.6f' % val_loss)
-        print('  validation error:\t%.2f%%' % val_err)
+        val_err = 100 * float(np.sum(val_err)) / len(self.test_loader.dataset)
+        val_acc = 1.0 - val_err/100.0
+        # print('  validation loss:\t%.6f' % val_loss)
+        # print('  validation error:\t%.2f%%' % val_err)
+        # print('  validation accuracy:\t%.2f%%' % val_acc)
         self.mlog.log(epoch=epoch, val_loss=val_loss, val_err=val_err)
-        self.acc.append(1.0 - val_err/100.0)
+        self.acc.append(val_acc)
+
+        return val_loss, val_acc
 
     def setup_training(self, depth, growth_rate, dropout, augment,
                        validate, epochs, save_weights, batch_size,
                        t_0, seed, scale_lr, how_scale, which_dataset,
-                       const_time, resume, model):
+                       const_time, resume, model, overlap):
 
         # Update save_weights:
         if save_weights == 'default_save':
