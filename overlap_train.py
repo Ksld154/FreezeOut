@@ -26,12 +26,8 @@ import sys
 import numpy as np
 
 import torch
-# import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable as V
-# import torchvision.datasets as dset
-# import torchvision.transforms as transforms
-# from torch.utils.data import DataLoader
 
 from utils import get_data_loader, MetricsLogger, progress
 # Set the recursion limit to avoid problems with deep nets
@@ -39,21 +35,27 @@ sys.setrecursionlimit(5000)
 os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 
+# LOSS_COVERGED_THRESHOLD = 0.05
+
+
 class Trainer():
-    def __init__(self, batch_size) -> None:
+    def __init__(self, batch_size, name) -> None:
         self.net = ''
         self.batch_size = batch_size
-        self.acc = []
         self.mlog = ''
         self.train_loader = ''
         self.test_loader = ''
         self.start_epoch = 0
         self.train_loss = []
 
+        self.name = ''
+        self.loss = []
+        self.acc = []
+        self.loss_delta = []
+
     # Training Function, presently only returns training loss
     # x: input data
     # y: target labels
-
     def train_fn(self, x, y):
         self.net.optim.zero_grad()
         output = self.net(V(x.cuda()))
@@ -104,16 +106,14 @@ class Trainer():
         self.net.train()
 
         # Execute training pass
+        # Update LR if using cosine annealing
         for x, y in batches:
-            # Update LR if using cosine annealing
             if 'itr' in self.net.lr_sched:
                 self.net.update_lr()
             train_loss.append(self.train_fn(x, y))
 
         # Report training metrics
         train_loss = float(np.mean(train_loss))
-        # print('  training loss:\t%.6f', train_loss)
-        # print(f'  training loss:\t{train_loss:.6f}')
         self.mlog.log(epoch=epoch, train_loss=float(train_loss))
 
         # Check how many layers are active
@@ -121,7 +121,7 @@ class Trainer():
         for m in self.net.modules():
             if hasattr(m, 'active') and m.active:
                 actives += 1
-        logging.info(f'Currently have {actives} active layers...')
+        logging.info(f'{self.name} currently have {actives} active layers...')
 
         return train_loss
 
@@ -144,18 +144,27 @@ class Trainer():
         val_loss = float(np.mean(val_loss))
         val_err = 100 * float(np.sum(val_err)) / len(self.test_loader.dataset)
         val_acc = 1.0 - val_err/100.0
-        # print('  validation loss:\t%.6f' % val_loss)
-        # print('  validation error:\t%.2f%%' % val_err)
-        # print('  validation accuracy:\t%.2f%%' % val_acc)
         self.mlog.log(epoch=epoch, val_loss=val_loss, val_err=val_err)
+
         self.acc.append(val_acc)
+        self.loss.append(val_loss)
+        self.loss_delta.append(self.get_loss_delta())
+        self.net.print_lr()
 
         return val_loss, val_acc
+
+    def get_loss_delta(self):
+        if len(self.loss) >= 2 and self.loss[-2] and self.loss[-1]:
+            delta = self.loss[-2] - self.loss[-1]
+            # self.loss_delta.append(delta)
+            return delta
+        else:
+            return np.nan
 
     def setup_training(self, depth, growth_rate, dropout, augment,
                        validate, epochs, save_weights, batch_size,
                        t_0, seed, scale_lr, how_scale, which_dataset,
-                       const_time, resume, model, overlap):
+                       const_time, resume, model, overlap, wait, window_size, switch, lr):
 
         # Update save_weights:
         if save_weights == 'default_save':
@@ -202,7 +211,7 @@ class Trainer():
                                      t_0=t_0,
                                      scale_lr=scale_lr,
                                      how_scale=how_scale,
-                                     const_time=const_time)
+                                     const_time=const_time, start_lr=lr)
             self.net = net.cuda()
             self.start_epoch = 0
         # from torchsummary import summary
@@ -211,44 +220,33 @@ class Trainer():
                      sum([p.data.nelement() for p in self.net.parameters()]))
 
     def train(self, validate=True, save_weights=False):
-        logging.info('Starting training at epoch %s...', self.start_epoch)
-        for epoch in range(self.start_epoch, self.net.epochs):
+        # logging.info('Starting training at epoch %s...', self.start_epoch)
+        # for epoch in range(self.start_epoch, self.net.epochs):
 
-            ### START TRAINING ###
-            self.train_loss = self.train_epoch(epoch=epoch)
+        #     ### START TRAINING ###
+        #     self.train_loss = self.train_epoch(epoch=epoch)
 
-            ### START TESTING ###
-            # Optionally, take a pass over the validation or test set.
-            if validate:
-                self.test_epoch(epoch=epoch)
+        #     ### START TESTING ###
+        #     # Optionally, take a pass over the validation or test set.
+        #     if validate:
+        #         self.test_epoch(epoch=epoch)
 
-            # Save weights for this epoch
-            print(f'Saving weights to {save_weights} ...')
-            torch.save(self.net, save_weights + '.pth')
+        #     # Save weights for this epoch
+        #     print(f'Saving weights to {save_weights} ...')
+        #     torch.save(self.net, save_weights + '.pth')
 
-            # start next_trainer
-            # t2 = Trainer(self.batch_size)
-            # t2.setup_training()
-            # t2.train_epoch()
+        #     # start next_trainer
+        #     # t2 = Trainer(self.batch_size)
+        #     # t2.setup_training()
+        #     # t2.train_epoch()
 
-        print(self.acc)
+        # print(self.acc)
 
-        # At the end of it all, save weights even if we didn't checkpoint.
-        if save_weights:
-            torch.save(self.net, save_weights + '.pth')
+        # # At the end of it all, save weights even if we didn't checkpoint.
+        # if save_weights:
+        #     torch.save(self.net, save_weights + '.pth')
+        pass
 
-
-# def main():
-#     start = time.time()
-#     t1 = Trainer(args.batch_size)
-#     t1.setup_training(**vars(args))
-#     t1.overlap_train(validate=args.validate, save_weights=args.save_weights)
-#     end = time.time()
-#     print(f'Total training time: {datetime.timedelta(seconds= end-start)}')
-
-#     # run
-#     # train_test(**vars(args))
-
-
-# if __name__ == '__main__':
-#     main()
+    def force_update_lr(self):
+        self.net.my_modify_lr()
+        # print(self.net)

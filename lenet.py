@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 import math
 import numpy as np
+import tabulate
 
 from utils import scale_fn
 
@@ -54,7 +55,7 @@ class LinearLayer(nn.Module):
 
 class Model(nn.Module):
 
-    def __init__(self, growthRate, depth, nClasses, epochs, t_0, scale_lr=True, how_scale='cubic', const_time=False):
+    def __init__(self, growthRate, depth, nClasses, epochs, t_0, scale_lr=True, how_scale='cubic', const_time=False, start_lr=0.1):
         super(Model, self).__init__()
 
         self.epochs = epochs
@@ -67,6 +68,7 @@ class Model(nn.Module):
         self.fc = self.make_fc()
         self.layer_index = 5
 
+        self.lr = start_lr
         self._initialize_weights()
 
         # for m in self.modules():
@@ -138,18 +140,6 @@ class Model(nn.Module):
     def _initialize_weights(self):
         self.layer_cnt = 0
         for m in self.modules():
-            # if isinstance(m, nn.Conv2d):
-            #     n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-            #     # m.weight.data.normal_(0, math.sqrt(2. / n))
-            #     if m.bias is not None:
-            #         m.bias.data.zero_()
-            # elif isinstance(m, nn.BatchNorm2d):
-            #     m.weight.data.fill_(1)
-            #     m.bias.data.zero_()
-            # elif isinstance(m, nn.Linear):
-            #     n = m.weight.size(1)
-            #     # m.weight.data.normal_(0, 0.01)
-            #     m.bias.data.zero_()
 
             # Set the layerwise scaling and annealing parameters
             if hasattr(m, 'active'):
@@ -165,7 +155,31 @@ class Model(nn.Module):
 
                 # Optionally scale the learning rates to have the same total
                 # distance traveled (modulo the gradients).
-                m.lr = 0.1 / m.lr_ratio if self.scale_lr else 0.1
+                m.lr = self.lr / m.lr_ratio if self.scale_lr else 0.1
+                # m.lr = 0.1 / m.lr_ratio if self.scale_lr else 0.1
                 print(
                     f'Layer #{m.layer_index}, learning rate: {m.lr:.4f}, stop iterations: {int(m.max_j)}, lr_ratio: {m.lr_ratio:.4f}')
                 # print(m.lr_ratio)
+
+    # Generate new model
+    def my_modify_lr(self):
+
+        # Loop over all modules
+        for m in self.modules():
+            if hasattr(m, 'active') and m.active:
+                for i, group in enumerate(self.optim.param_groups):
+                    if group['layer_index'] == m.layer_index:
+                        self.optim.param_groups[i]['lr'] /= 5
+
+        # print learning rate of each layer
+        self.print_lr()
+        # header = ['layer_index', 'lr']
+        # rows = [[x.get('layer_index'), x.get('lr')]
+        #         for x in self.optim.param_groups]
+        # print(tabulate.tabulate(rows, header))
+
+    def print_lr(self):
+        header = ['layer_index', 'lr']
+        rows = [[x.get('layer_index'), x.get('lr')]
+                for x in self.optim.param_groups]
+        print(tabulate.tabulate(rows, header))

@@ -24,6 +24,9 @@ import time
 import datetime
 from argparse import ArgumentParser
 from concurrent.futures import ThreadPoolExecutor
+import copy
+
+import numpy as np
 
 # my library
 from overlap_train import Trainer
@@ -32,7 +35,10 @@ import myplot
 
 # Set the recursion limit to avoid problems with deep nets
 sys.setrecursionlimit(5000)
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+LOSS_COVERGED_THRESHOLD = 0.01
+LOSS_DIFF_THRESHOLD = 0.01
 
 
 def opts_parser():
@@ -107,86 +113,153 @@ def opts_parser():
     parser.add_argument(
         '--no-overlap', action='store_false', dest='overlap',
         help='Disable overlap')
+    parser.add_argument(
+        '--wait', action='store_true', default=True,
+        help='Transmission Time (ensabled by default)')
+    parser.add_argument(
+        '--no-wait', action='store_false', dest='wait',
+        help='Disable Transmission Time')
+    parser.add_argument(
+        '--switch', action='store_true', default=True,
+        help='Switch between base model and next model (ensabled by default)')
+    parser.add_argument(
+        '--no-switch', action='store_false', dest='switch',
+        help='Disable Switch model')
+    parser.add_argument(
+        '--window_size', type=int, default=3,
+        help='Moving average window size for model loss difference (default: %(default)s)')
+    parser.add_argument(
+        '--lr', type=float, default=0.1,
+        help='Initial learning rate (default: %(default)s)')
     return parser
 
 
-def overlap_train(args):
-    t1 = Trainer(args.batch_size)
-    t1.setup_training(**vars(args))
-    t1_acc = []
-    t1_loss = []
+class Experiment():
+    def __init__(self, args) -> None:
+        self.args = args
+        self.t1 = ''
+        self.t2 = ''
+        self.loss_diff = []
 
-    t2_args = args
-    t2_args.how_scale = 'linear'
-    t2 = Trainer(args.batch_size)
-    t2.setup_training(**vars(t2_args))
-    t2_acc = []
-    t2_loss = []
+    def overlap_train(self, args):
+        t1_args = args
+        t1_args.scale_lr = True
+        t1_args.how_scale = 'cubic'
+        t1_args.t_0 = 0.3
+        t1_args.lr = 0.1
+        t1 = Trainer(t1_args.batch_size, "t1")
+        t1.setup_training(**vars(t1_args))
 
-    for e in range(args.epochs):
-        print('')
-        logging.info(f'Epoch: {e+1}/{args.epochs}')
+        t2_args = args
+        t2_args.scale_lr = True
+        t1_args.how_scale = 'cubic'
+        t1_args.t_0 = 0.8
+        t1_args.lr = 0.1
+        t2 = Trainer(t2_args.batch_size, "t2")
+        t2.setup_training(**vars(t2_args))
+        both_converged = False
 
-        t1.train_epoch(e)
-        loss_1, acc_1 = t1.test_epoch(e)
-        print(f'\tBase model loss: \t{loss_1:.4f}')
-        print(f'\tBase model accuracy: \t{acc_1:.4f}')
-        t1_acc.append(acc_1)
-        t1_loss.append(loss_1)
-
-        if args.overlap:
-            # t1 transmission
-            print('***[BG] Start Tensor transmission!***')
-            trans1 = Transmitter()
-            trans1.start()
-
-            # train next_model on background thread
-            print('***[FG] Start next_trainer!***')
-            future = ''
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                executor.submit(t2.train_epoch, e)
-                future = executor.submit(t2.test_epoch, e)
-
-            # Receive model update from central
-            trans1.join()
-            print('***Tensor transmission done!***')
-
-            # check if t2 is finish
-            if future.done():
-                # print(future.result())
-                loss_2, acc_2 = future.result()
-
-            else:
-                # next_trainer is not ready, so we will not wait for it and discard it's result
-                print('***next_trainer is not ready!***')
-                continue
+        if not args.wait:
+            print("***SKIP TRANSMISSION TIME!***")
+            TRANSMIT_TIME = 0
         else:
-            t2.train_epoch(e)
-            loss_2, acc_2 = t2.test_epoch(e)
-            print('***[FG] Start Tensor transmission!***')
-            trans1 = Transmitter()
-            trans1.start()
-            trans1.join()
-            print('***Tensor transmission done!***')
+            TRANSMIT_TIME = 20
 
-        print(f'\tNext model loss: \t{loss_2:.4f}')
-        print(f'\tNext model accuracy: \t{acc_2:.4f}')
-        t2_loss.append(loss_2)
-        t2_acc.append(acc_2)
+        for e in range(args.epochs):
+            print('')
+            logging.info(f'Epoch: {e+1}/{args.epochs}')
 
-    print(t1_acc)
-    print(t1_loss)
-    print(t2_acc)
-    print(t2_loss)
+            t1.train_epoch(e)
+            loss_1, acc_1 = t1.test_epoch(e)
+            print(f'\tBase model loss: \t{loss_1:.4f}')
+            print(f'\tBase model accuracy: \t{acc_1:.4f}')
 
-    if args.overlap:
-        overlapped = 'Overlap'
-    else:
-        overlapped = 'Non-Overlap'
-    myplot.plot(t1_acc, t2_acc, f"FreezeOut {overlapped} Accuracy", 1)
-    myplot.plot(t1_loss, t2_loss, f"FreezeOut {overlapped} Loss", 2)
-    # myplot.plot(myplot.gradually_overlap, myplot.gradually_loss, 3)
-    myplot.show()
+            if args.overlap:
+                # t1 transmission
+                print('***[BG] Start Tensor transmission!***')
+                trans1 = Transmitter(TRANSMIT_TIME)
+                trans1.start()
+
+                # train next_model on background thread
+                print('***[FG] Start next_trainer!***')
+                future = ''
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    executor.submit(t2.train_epoch, e)
+                    future = executor.submit(t2.test_epoch, e)
+
+                # Receive model update from central
+                trans1.join()
+                print('***Tensor transmission done!***')
+
+                # check if t2 is finish
+                if future.done():
+                    # print(future.result())
+                    loss_2, acc_2 = future.result()
+
+                else:
+                    # next_trainer is not ready, so we will not wait for it and discard it's result
+                    print('***next_trainer is not ready!***')
+                    continue
+            else:
+                t2.train_epoch(e)
+                loss_2, acc_2 = t2.test_epoch(e)
+                print('***[FG] Start Tensor transmission!***')
+                trans1 = Transmitter(TRANSMIT_TIME)
+                trans1.start()
+                trans1.join()
+                print('***Tensor transmission done!***')
+
+            print(f'\tNext model loss: \t{loss_2:.4f}')
+            print(f'\tNext model accuracy: \t{acc_2:.4f}')
+
+            self.loss_diff.append(loss_2-loss_1)
+            diff_ma = self.moving_average(self.loss_diff)
+            print(diff_ma)
+
+            if self.is_coverged(t1) and self.is_coverged(t2):
+                print('*** Both model are converged! ***')
+                both_converged = True
+
+            # [TODO] Switch between models
+            if args.switch and both_converged and not np.isnan(diff_ma) and diff_ma < LOSS_DIFF_THRESHOLD:
+                print('*** Switch model! ***')
+                t2_model_clone = copy.deepcopy(t2.net)
+                t1.net = t2_model_clone
+                t2.force_update_lr()
+
+                self.loss_diff.clear()
+
+        print(t1.acc)
+        print(t1.loss)
+        print(t2.acc)
+        print(t2.loss)
+        self.t1 = t1
+        self.t2 = t2
+
+    def moving_average(self, data):
+        # print(len(data))
+        if len(data) < self.args.window_size:
+            return np.nan
+        return sum(self.data[-self.args.window_size:]) / self.args.window_size
+
+    def is_coverged(self, trainer):
+        delta_ma = self.moving_average(trainer.loss_delta)
+        if not np.isnan(delta_ma) and delta_ma <= LOSS_COVERGED_THRESHOLD:
+            return True
+        else:
+            return False
+
+    def plot_figure(self):
+        if self.args.overlap:
+            overlapped = 'Overlap'
+        else:
+            overlapped = 'Non-Overlap'
+
+        myplot.plot(self.t1.acc, self.t2.acc, 'Accuracy',
+                    f"FreezeOut {overlapped} Accuracy", 1)
+        myplot.plot(self.t1.loss, self.t2.loss, 'Loss',
+                    f"FreezeOut {overlapped} Loss", 2)
+        myplot.show()
 
 
 def main():
@@ -197,9 +270,11 @@ def main():
     args = parser.parse_args()
 
     start = time.time()
-    overlap_train(args)
+    exp = Experiment(args)
+    exp.overlap_train(args)
     end = time.time()
     print(f'Total training time: {datetime.timedelta(seconds= end-start)}')
+    exp.plot_figure()
 
 
 if __name__ == '__main__':
