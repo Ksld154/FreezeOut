@@ -240,7 +240,7 @@ class Experiment():
         # print(len(data))
         if len(data) < self.args.window_size:
             return np.nan
-        return sum(self.loss_diff[-self.args.window_size:]) / self.args.window_size
+        return sum(data[-self.args.window_size:]) / self.args.window_size
 
     def is_coverged(self, trainer):
         delta_ma = self.moving_average(trainer.loss_delta)
