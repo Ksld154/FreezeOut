@@ -159,7 +159,6 @@ class Model(nn.Module):
                 # m.lr = 0.1 / m.lr_ratio if self.scale_lr else 0.1
                 print(
                     f'Layer #{m.layer_index}, learning rate: {m.lr:.4f}, stop iterations: {int(m.max_j)}, lr_ratio: {m.lr_ratio:.4f}')
-                # print(m.lr_ratio)
 
     # Generate new model
     def my_modify_lr(self):
@@ -172,11 +171,8 @@ class Model(nn.Module):
                         self.optim.param_groups[i]['lr'] /= 5
 
         # print learning rate of each layer
-        self.print_lr()
-        # header = ['layer_index', 'lr']
-        # rows = [[x.get('layer_index'), x.get('lr')]
-        #         for x in self.optim.param_groups]
-        # print(tabulate.tabulate(rows, header))
+        # self.print_lr()
+
 
     def print_lr(self):
         header = ['layer_index', 'lr']

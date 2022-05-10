@@ -189,3 +189,8 @@ def progress(items, desc='', total=None, min_delay=0.1):
     t_total = time.time() - t_start
     print("\r%s%d/%d (100.00%%) (took %d:%02d)" % ((desc, total, total) +
                                                    divmod(t_total, 60)))
+
+def moving_average(data, window_size):
+    if len(data) < window_size:
+        return np.nan
+    return sum(data[-window_size:]) / window_size

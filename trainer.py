@@ -20,8 +20,6 @@ https://github.com/Lasagne/Recipes/blob/master/papers/densenet
 import os
 import logging
 import sys
-# import time
-# import datetime
 
 import numpy as np
 
@@ -29,18 +27,17 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Variable as V
 
-from utils import get_data_loader, MetricsLogger, progress
+from utils import get_data_loader, MetricsLogger, progress, moving_average
+from constants import *
+
 # Set the recursion limit to avoid problems with deep nets
 sys.setrecursionlimit(5000)
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
-
-
-# LOSS_COVERGED_THRESHOLD = 0.05
+# os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 
 class Trainer():
     def __init__(self, batch_size, name) -> None:
-        self.net = ''
+        self.net = None
         self.batch_size = batch_size
         self.mlog = ''
         self.train_loader = ''
@@ -48,10 +45,14 @@ class Trainer():
         self.start_epoch = 0
         self.train_loss = []
 
-        self.name = ''
+        self.name = name
         self.loss = []
         self.acc = []
-        self.loss_delta = []
+        self.loss_delta = [] # for loss converge or not
+        self.loss_diff = [] # compare with best model
+        
+        self.window_size = 5
+        self.t_0 = 0
 
     # Training Function, presently only returns training loss
     # x: input data
@@ -149,14 +150,13 @@ class Trainer():
         self.acc.append(val_acc)
         self.loss.append(val_loss)
         self.loss_delta.append(self.get_loss_delta())
-        self.net.print_lr()
+        # self.net.print_lr()
 
         return val_loss, val_acc
 
     def get_loss_delta(self):
         if len(self.loss) >= 2 and self.loss[-2] and self.loss[-1]:
-            delta = self.loss[-2] - self.loss[-1]
-            # self.loss_delta.append(delta)
+            delta = abs(self.loss[-2] - self.loss[-1])
             return delta
         else:
             return np.nan
@@ -164,7 +164,9 @@ class Trainer():
     def setup_training(self, depth, growth_rate, dropout, augment,
                        validate, epochs, save_weights, batch_size,
                        t_0, seed, scale_lr, how_scale, which_dataset,
-                       const_time, resume, model, overlap, wait, window_size, switch, lr):
+                       const_time, resume, model, overlap, wait, window_size, switch, lr, gpu_device):
+        self.window_size = window_size
+        self.t_0 = t_0
 
         # Update save_weights:
         if save_weights == 'default_save':
@@ -219,34 +221,71 @@ class Trainer():
         logging.info('Number of params: %d',
                      sum([p.data.nelement() for p in self.net.parameters()]))
 
-    def train(self, validate=True, save_weights=False):
-        # logging.info('Starting training at epoch %s...', self.start_epoch)
-        # for epoch in range(self.start_epoch, self.net.epochs):
 
-        #     ### START TRAINING ###
-        #     self.train_loss = self.train_epoch(epoch=epoch)
+    def setup_training_2(self, args):
+        self.window_size = args.window_size
 
-        #     ### START TESTING ###
-        #     # Optionally, take a pass over the validation or test set.
-        #     if validate:
-        #         self.test_epoch(epoch=epoch)
+        # Update save_weights:
+        if args.save_weights == 'default_save':
+            args.save_weights = (args.model + '_k' + str(args.growth_rate) + 'L' + str(args.depth)
+                            + '_ice' + str(int(100*args.t_0)) + '_' +
+                            args.how_scale + str(args.scale_lr)
+                            + '_seed' + str(args.seed) + '_epochs' + str(args.epochs)
+                            + 'C' + str(args.which_dataset))
 
-        #     # Save weights for this epoch
-        #     print(f'Saving weights to {save_weights} ...')
-        #     torch.save(self.net, save_weights + '.pth')
+        # Seed RNG
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed(args.seed)
+        np.random.seed(args.seed)
 
-        #     # start next_trainer
-        #     # t2 = Trainer(self.batch_size)
-        #     # t2.setup_training()
-        #     # t2.train_epoch()
+        # Name of the file to which we're saving losses and errors.
+        metrics_fname = 'logs/'+args.save_weights + '_log.jsonl'
+        logging.info('Metrics will be saved to %s', metrics_fname)
+        logging.info('Running with seed %s, t_0 of %s, and the %s scaling method with learning rate scaling set to %s.',
+                     str(args.seed), str(args.t_0), args.how_scale, str(args.scale_lr))
+        self.mlog = MetricsLogger(metrics_fname, reinitialize=(not args.resume))
 
-        # print(self.acc)
+        # Import the model module
+        # Get information specific to each dataset
+        model_module = __import__(args.model)
+        self.train_loader, self.test_loader = get_data_loader(args.which_dataset, args.augment,
+                                                              args.validate, self.batch_size)
 
-        # # At the end of it all, save weights even if we didn't checkpoint.
-        # if save_weights:
-        #     torch.save(self.net, save_weights + '.pth')
-        pass
+        # Build network, either by initializing it or loading a pre-trained
+        # network.
+        if args.resume:
+            logging.info(f'loading network {args.save_weights}...')
+            self.net = torch.load(args.save_weights + '.pth')
+
+            # Which epoch we're starting from
+            self.start_epoch = self.net.epoch + \
+                1 if hasattr(self.net, 'epoch') else 0
+
+        #  Get net
+        else:
+            logging.info('Instantiating network with model %s ...', args.model)
+            net = model_module.Model(args.growth_rate, depth=args.depth,
+                                     nClasses=args.which_dataset,
+                                     epochs=args.epochs,
+                                     t_0=args.t_0,
+                                     scale_lr=args.scale_lr,
+                                     how_scale=args.how_scale,
+                                     const_time=args.const_time, start_lr=args.lr)
+            self.net = net.cuda()
+            self.start_epoch = 0
+        logging.info('Number of params: %d',
+                     sum([p.data.nelement() for p in self.net.parameters()]))
+        # from torchsummary import summary
+        # summary(self.net, (3, 28, 28))
+
 
     def force_update_lr(self):
         self.net.my_modify_lr()
         # print(self.net)
+
+    def is_converged(self):
+        avg_loss_delta = moving_average(self.loss_delta, self.window_size)
+        if not np.isnan(avg_loss_delta) and avg_loss_delta <= LOSS_CONVERGED_THRESHOLD:
+            return True
+        else:
+            return False

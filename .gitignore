@@ -56,3 +56,5 @@ WRN logs
 logs
 *.tar.gz
 cifar
+
+results/

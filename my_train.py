@@ -29,16 +29,19 @@ import copy
 import numpy as np
 
 # my library
-from overlap_train import Trainer
+from trainer import Trainer
 from transmitter import Transmitter
 import myplot
+from constants import *
+from utils import moving_average
+import tools.csv_exporter
 
 # Set the recursion limit to avoid problems with deep nets
 sys.setrecursionlimit(5000)
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-LOSS_COVERGED_THRESHOLD = 0.01
-LOSS_DIFF_THRESHOLD = 0.01
+# LOSS_COVERGED_THRESHOLD = 0.01
+# LOSS_DIFF_THRESHOLD = 0.01
 
 
 def opts_parser():
@@ -109,55 +112,70 @@ def opts_parser():
 
     parser.add_argument(
         '--overlap', action='store_true', default=True,
-        help='Transmission overlap (ensabled by default)')
+        help='Transmission overlap (enabled by default)')
     parser.add_argument(
         '--no-overlap', action='store_false', dest='overlap',
         help='Disable overlap')
     parser.add_argument(
         '--wait', action='store_true', default=True,
-        help='Transmission Time (ensabled by default)')
+        help='Transmission Time (enabled by default)')
     parser.add_argument(
         '--no-wait', action='store_false', dest='wait',
         help='Disable Transmission Time')
     parser.add_argument(
         '--switch', action='store_true', default=True,
-        help='Switch between base model and next model (ensabled by default)')
+        help='Switch between base model and next model (enabled by default)')
     parser.add_argument(
         '--no-switch', action='store_false', dest='switch',
         help='Disable Switch model')
     parser.add_argument(
-        '--window_size', type=int, default=3,
+        '--window_size', type=int, default=5,
         help='Moving average window size for model loss difference (default: %(default)s)')
     parser.add_argument(
         '--lr', type=float, default=0.1,
         help='Initial learning rate (default: %(default)s)')
+    parser.add_argument('-g',
+                    '--gpu',
+                    default=0,
+                    dest='gpu_device',
+                    help='Specify which gpu device to use (default: %(default)s)',
+                    type=int)
+    parser.add_argument(
+        '--multi_model', action='store_true', default=False,
+        help='Multiple FreezeOut Models (disabled by default)')
+    parser.add_argument(
+        '--no-multi_model', action='store_false', dest='multi_modell',
+        help='Disable Multiple FreezeOut Models')
+    
     return parser
 
 
 class Experiment():
     def __init__(self, args) -> None:
         self.args = args
-        self.t1 = ''
-        self.t2 = ''
+        self.t1 = None
+        self.t2 = None
         self.loss_diff = []
+
+        self.all_trainers = []
+        self.data_to_plot = []
+
+        self.results_dir = None
 
     def overlap_train(self, args):
         t1_args = args
-        t1_args.scale_lr = True
-        t1_args.how_scale = 'cubic'
         t1_args.t_0 = 0.3
-        t1_args.lr = 0.1
         t1 = Trainer(t1_args.batch_size, "t1")
-        t1.setup_training(**vars(t1_args))
+        # t1.setup_training(**vars(t1_args))
+        t1.setup_training_2(t1_args)
+
 
         t2_args = args
-        t2_args.scale_lr = True
-        t1_args.how_scale = 'cubic'
         t1_args.t_0 = 0.8
-        t1_args.lr = 0.1
         t2 = Trainer(t2_args.batch_size, "t2")
-        t2.setup_training(**vars(t2_args))
-        both_converged = False
+        # t2.setup_training(**vars(t2_args))
+        t2.setup_training_2(t2_args)
+
 
         if not args.wait:
             print("***SKIP TRANSMISSION TIME!***")
@@ -203,31 +221,32 @@ class Experiment():
             else:
                 t2.train_epoch(e)
                 loss_2, acc_2 = t2.test_epoch(e)
-                print('***[FG] Start Tensor transmission!***')
+                # print('***[FG] Start Tensor transmission!***')
                 trans1 = Transmitter(TRANSMIT_TIME)
                 trans1.start()
                 trans1.join()
-                print('***Tensor transmission done!***')
+                # print('***Tensor transmission done!***')
 
             print(f'\tNext model loss: \t{loss_2:.4f}')
             print(f'\tNext model accuracy: \t{acc_2:.4f}')
 
             self.loss_diff.append(loss_2-loss_1)
-            diff_ma = self.moving_average(self.loss_diff)
-            print(diff_ma)
+            avg_loss_diff = moving_average(self.loss_diff, args.window_size)
+            print(avg_loss_diff)
 
-            if self.is_coverged(t1) and self.is_coverged(t2):
-                print('*** Both model are converged! ***')
-                both_converged = True
+            print(f't1:{t1.is_converged()} t2:{t2.is_converged()}')
 
-            # [TODO] Switch between models
-            if args.switch and both_converged and not np.isnan(diff_ma) and diff_ma < LOSS_DIFF_THRESHOLD:
-                print('*** Switch model! ***')
-                t2_model_clone = copy.deepcopy(t2.net)
-                t1.net = t2_model_clone
-                t2.force_update_lr()
+            if t1.is_converged() :
+                print('*** Bad model is converged! ***')
+                
+                # [TODO] Switch between models
+                if args.switch and not np.isnan(avg_loss_diff) and avg_loss_diff < LOSS_DIFF_THRESHOLD:
+                    print('*** Switch model! ***')
+                    t2_model_clone = copy.deepcopy(t2.net)
+                    t1.net = t2_model_clone
+                    t2.force_update_lr()
+                    self.loss_diff.clear()
 
-                self.loss_diff.clear()
 
         print(t1.acc)
         print(t1.loss)
@@ -236,45 +255,144 @@ class Experiment():
         self.t1 = t1
         self.t2 = t2
 
-    def moving_average(self, data):
-        # print(len(data))
-        if len(data) < self.args.window_size:
-            return np.nan
-        return sum(data[-self.args.window_size:]) / self.args.window_size
+    
+    def multi_model_train(self, args, possible_t0):
+        # possible_t0 = [0.3, 0.5, 0.8]
+        print(possible_t0)
 
-    def is_coverged(self, trainer):
-        delta_ma = self.moving_average(trainer.loss_delta)
-        if not np.isnan(delta_ma) and delta_ma <= LOSS_COVERGED_THRESHOLD:
-            return True
+        for idx, t_0 in enumerate(possible_t0):
+            new_args = args
+            new_args.t_0 = t_0
+            new_trainer = Trainer(new_args.batch_size, f"t_0={t_0}")
+            if args.switch:
+                new_trainer.name = f"Our Method: t_0={t_0}"
+            new_trainer.setup_training_2(new_args)
+            self.all_trainers.append(new_trainer)
+
+        for e in range(args.epochs):
+            this_round_acc = []
+            this_round_loss = []
+
+            logging.info(f'Epoch: {e+1}/{args.epochs}')
+
+            for trainer_obj in self.all_trainers:
+                trainer_obj.train_epoch(e)
+                loss, acc = trainer_obj.test_epoch(e)
+            
+                print(f'\t{trainer_obj.name} loss: \t\t{loss:.4f}')
+                print(f'\t{trainer_obj.name} accuracy: \t{acc:.4f}')
+                this_round_loss.append(loss)
+                this_round_acc.append(acc)
+
+
+            # [TODO] compare and switch model 
+            best_loss = min(this_round_loss)
+            best_trainer_idx = np.argmin(this_round_loss)
+
+            for idx, trainer_obj in enumerate(self.all_trainers):
+                print(f'{trainer_obj.name}: {trainer_obj.is_converged()}')
+                if idx == best_trainer_idx:
+                    continue
+                
+                trainer_obj.loss_diff.append(best_loss - this_round_loss[idx])
+                avg_loss_diff = moving_average(trainer_obj.loss_diff, args.window_size)
+                print(avg_loss_diff)
+
+                if trainer_obj.is_converged() :
+                    print(f'*** {trainer_obj.name} is converged! ***')
+                    
+                    # [TODO] Switch between models
+                    if args.switch and not np.isnan(avg_loss_diff) and avg_loss_diff < LOSS_DIFF_THRESHOLD:
+                        print('*** Switch model! ***')
+                        best_model_clone = copy.deepcopy(self.all_trainers[best_trainer_idx].net)
+                        trainer_obj.net = best_model_clone
+                        trainer_obj.loss_diff.clear()
+                        # t2.force_update_lr()
+
+        all_acc = [t.acc for t in self.all_trainers]
+        print(all_acc)
+
+        for t in self.all_trainers:
+            d = dict(name=t.name, acc=t.acc)
+            self.data_to_plot.append(d)
+        print(self.data_to_plot)
+    
+    def plot_figure(self, timestamp):
+
+        if not self.args.multi_model:
+            # if self.args.overlap:
+            #     overlapped = 'Overlap'
+            # else:
+            #     overlapped = 'Non-Overlap'
+            # myplot.plot(self.t1.acc, self.t2.acc, 'Accuracy',
+            #             f"FreezeOut {overlapped} Accuracy", 1)
+            # myplot.plot(self.t1.loss, self.t2.loss, 'Loss',
+            #             f"FreezeOut {overlapped} Loss", 2)
+            myplot.multiplot(all_data=self.data_to_plot, 
+                y_label='Accuracy', 
+                title= f'FreezeOut Multi-Model Accuracy (Model Switch: {self.args.switch})',
+                figure_idx=1
+            )
+            png_file = os.path.join(self.results_dir, f"Single-Machine FreezeOut Accuracy_{timestamp}.png")
+            print(png_file)
+            myplot.save_figure(png_file)
         else:
-            return False
+            myplot.multiplot(all_data=self.data_to_plot, 
+                y_label='Accuracy', 
+                title= f'FreezeOut Multi-Model Accuracy (Model Switch: {self.args.switch})',
+                figure_idx=1
+            )
+            png_file = os.path.join(self.results_dir, f"Single-Machine FreezeOut Accuracy_{timestamp}.png")
+            print(png_file)
+            myplot.save_figure(png_file)
 
-    def plot_figure(self):
-        if self.args.overlap:
-            overlapped = 'Overlap'
-        else:
-            overlapped = 'Non-Overlap'
-
-        myplot.plot(self.t1.acc, self.t2.acc, 'Accuracy',
-                    f"FreezeOut {overlapped} Accuracy", 1)
-        myplot.plot(self.t1.loss, self.t2.loss, 'Loss',
-                    f"FreezeOut {overlapped} Loss", 2)
         myplot.show()
 
+    def output_csv(self, data, filename, fields):
+        csv_file = os.path.join(self.results_dir, filename)
+        print(csv_file)
+        tools.csv_exporter.export_csv(data=data, filepath=csv_file, fields=fields)
+
+    def setup_folders(self):
+        base_dir = os.path.dirname(__file__)
+        now = datetime.datetime.now()
+        dt_string = now.strftime("%m-%d-%Y_%H%M%S")
+        results_dir = os.path.join(base_dir, 'results/', dt_string)
+        if not os.path.isdir(results_dir):
+            os.makedirs(results_dir)
+        print(results_dir)
+
+        self.results_dir = results_dir
+
+        return dt_string
 
 def main():
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s [%(levelname)s] %(message)s',
-                        datefmt='%Y-%m-%d %H:%M:%S')
+                        datefmt='%Y-%m-%d %H%M%S')
     parser = opts_parser()
     args = parser.parse_args()
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_device)
+    print(f'GPU Device: {args.gpu_device}')
 
     start = time.time()
+    
     exp = Experiment(args)
-    exp.overlap_train(args)
+    dt_string = exp.setup_folders()
+    
+    if args.multi_model:
+        print('Using Multiple FreezeOut Models!')
+        exp.multi_model_train(args, [0.3, 0.5, 0.8])
+    else:
+        # exp.overlap_train(args)
+        exp.multi_model_train(args, [0.3, 0.8])
+    
     end = time.time()
     print(f'Total training time: {datetime.timedelta(seconds= end-start)}')
-    exp.plot_figure()
+    
+
+    exp.output_csv(data=exp.data_to_plot, filename="result.csv", fields=["name", "acc"]) 
+    exp.plot_figure(dt_string)
 
 
 if __name__ == '__main__':

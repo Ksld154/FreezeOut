@@ -36,7 +36,7 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 
 from utils import get_data_loader, MetricsLogger, progress
-from overlap_train import Trainer
+from trainer import Trainer
 from transmitter import Transmitter
 import myplot
 # Set the recursion limit to avoid problems with deep nets
